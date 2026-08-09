@@ -8,7 +8,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/data_engineering/ ./src/data_engineering/
-COPY data/ ./data/
 
 EXPOSE 8002
 

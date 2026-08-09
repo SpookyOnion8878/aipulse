@@ -1,0 +1,250 @@
+# AIPulse Enterprise AI Platform — Docker Compose
+# Last Updated: 2026-08-09
+
+version: "3.8"
+
+services:
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./src/system
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - MODEL_CACHE_PATH=/data/models
+    volumes:
+      - ./data/raw:/data/raw
+      - ./data/processed:/data/processed
+      - ./models:/models
+      - ./logs:/logs
+    restart: unless-stopped
+    depends_on:
+      - model-serving
+      - feature-store
+      - postgres
+      - redis
+
+  # Model Serving
+  model-serving:
+    build:
+      context: ./src/core
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - MODEL_MODEL_NAME=ai_model
+      - MODEL_MODEL_PATH=/models/ai_model
+    volumes:
+      - ./models:/models
+      - ./data/raw:/data/raw
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  # Feature Store
+  feature-store:
+    build:
+      context: ./src/data_engineering
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - FEAST_INGESTION_INTERVAL=60
+      - FEAST_OFFLINE_PATH=/features/offline
+      - FEAST_ONLINE_PATH=/features/online
+    volumes:
+      - ./data/processed:/features/online
+      - ./data/dvc:/features/offline
+    restart: unless-stopped
+
+  # Data Ingestion
+  data-ingestion:
+    build:
+      context: ./src/data_engineering
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - DATA_SOURCE_PATH=/data/raw
+      - DATA_OUTPUT_PATH=/data/processed
+    volumes:
+      - ./data/raw:/data/raw
+      - ./data/processed:/data/processed
+    restart: unless-stopped
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+
+  # InfluxDB (time-series)
+  influxdb:
+    image: influxdb:1.8
+    ports:
+      - "8086:8086"
+    environment:
+      - ADMIN_INITIAL_PASSWORD=admin
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+    restart: unless-stopped
+
+  # Elasticsearch (logging)
+  elasticsearch:
+    image: elasticsearch:8.8.0
+    ports:
+      - "9200:9200"
+    environment:
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+
+  # Redis (caching)
+  redis:
+    image: redis:7.0.0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # Postgres (metadata)
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin
+      - POSTGRES_DB=aipulse
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Training Worker
+  training-worker:
+    build:
+      context: ./src/core
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - GPU_COUNT=4
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./data/raw:/data/raw
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Training Runner
+  training-runner:
+    build:
+      context: ./src/core
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - TRAINING_MODE=distributed
+      - TRAINING_NODES=4
+    volumes:
+      - ./data/raw:/data/raw
+      - ./models:/models
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # AI Ethics Scanner
+  ai-ethics:
+    build:
+      context: ./src/security
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - ETHICS_THRESHOLD=0.1
+      - COMPLIANCE_MODE=strict
+    volumes:
+      - ./data/raw:/data/raw
+    restart: unless-stopped
+
+  # Frontend Dashboard
+  dashboard:
+    build:
+      context: ./src/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - FLASK_ENV=production
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./src/frontend/static:/app/static
+    restart: unless-stopped
+
+  # Admin Panel
+  admin-panel:
+    build:
+      context: ./src/frontend
+      dockerfile: Dockerfile_admin
+    ports:
+      - "8081:8080"
+    environment:
+      - LOG_LEVEL=INFO
+      - ROLE=admin
+    restart: unless-stopped
+
+  # File Storage
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=minio123
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  # Log Aggregation
+  log-aggregator:
+    image: elastic/beats:8.8.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logs:/usr/share/elasticsearch/logs
+    restart: unless-stopped
+
+volumes:
+  influxdb-data:
+  elasticsearch-data:
+  redis-data:
+  postgres-data:
+  minio-data:
+  redis-data:

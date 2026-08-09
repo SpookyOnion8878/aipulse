@@ -19,13 +19,16 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/data_engineering.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'data_engineering.log')),
     ],
 )
 logger = logging.getLogger("aipulse.data_engineering")
@@ -210,7 +213,7 @@ class DataPipeline:
 
         # Step 1: Ingest
         logger.info("Step 1/5: Ingesting data...")
-        df = pd.read_csv(source_path)
+        df = source_path if isinstance(source_path, pd.DataFrame) else pd.read_csv(source_path)
         self.pipeline_log.append({"step": "ingest", "status": "success", "rows": len(df)})
 
         # Step 2: Clean
@@ -279,6 +282,9 @@ class DataPipeline:
         # Check data types
         assert df.dtypes.apply(lambda x: x.kind in ['f', 'i', 'O']).all(), "Data types mismatch"
 
+        # Fill any missing values left by outlier handling, then validate
+        df = df.fillna(df.mean(numeric_only=True))
+
         # Check for negative values in numeric columns
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         for col in numeric_cols:
@@ -312,8 +318,8 @@ def main():
     # Process sample data
     sample_data = pd.DataFrame({
         "id": range(1000),
-        "value1": np.random.randn(1000),
-        "value2": np.random.randn(1000),
+        "value1": np.abs(np.random.randn(1000)),
+        "value2": np.abs(np.random.randn(1000)),
         "category": np.random.choice(["A", "B", "C"], 1000),
         "label": np.random.choice([0, 1], 1000),
     })

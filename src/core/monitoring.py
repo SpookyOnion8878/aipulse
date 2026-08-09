@@ -17,13 +17,16 @@ from typing import Optional, Dict, List, Any
 import pandas as pd
 import numpy as np
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'monitoring_report.json')),
+        logging.FileHandler(os.path.join(LOG_DIR, 'monitoring_report.json')),
     ],
 )
 logger = logging.getLogger("aipulse.monitoring")

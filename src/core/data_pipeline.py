@@ -18,13 +18,16 @@ import pandas as pd
 import numpy as np
 import yaml
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'pipeline.log')),
+        logging.FileHandler(os.path.join(LOG_DIR, 'pipeline.log')),
     ],
 )
 logger = logging.getLogger("aipulse.data_pipeline")

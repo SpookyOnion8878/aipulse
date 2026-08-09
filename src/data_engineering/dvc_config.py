@@ -15,13 +15,16 @@ from typing import Optional, Dict, List
 
 import yaml
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/dvc.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'dvc.log')),
     ],
 )
 logger = logging.getLogger("aipulse.dvc")
@@ -151,9 +154,10 @@ class DataVersioningManager:
 
     def init_dvc_repo(self) -> DVCRepository:
         """Initialize DVC repository."""
-        self.vc.init_repo()
+        repo = DVCRepository("data/dvc")
+        repo.init_repo()
         self.config.configure({"version_control": "dvc", "storage": "filesystem"})
-        return DVCRepository(self.config)
+        return repo
 
     def create_version(self, source_file: str, version_name: str) -> str:
         """Create a new data version."""
@@ -181,14 +185,14 @@ def main():
     manager = DataVersioningManager(config)
 
     # Initialize DVC repo
-    repo = manager.init_dvc_repo()
+    manager.init_dvc_repo()
 
     # Create a version
-    version = repo.create_version("data/raw/dataset.csv", "v1.0.0")
+    version = manager.create_version("data/raw/dataset.csv", "v1.0.0")
     print(f"Created version: {version}")
 
     # Tag version
-    repo.tag_version("v1.0.0", "release")
+    manager.tag_version("v1.0.0", "release")
 
     # List snapshots
     snapshots = manager.vc.list_snapshots()

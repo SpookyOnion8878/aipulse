@@ -16,13 +16,16 @@ from typing import Optional, Dict, List, Any
 
 import yaml
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/orchestration.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'orchestration.log')),
     ],
 )
 logger = logging.getLogger("aipulse.orchestration")

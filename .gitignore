@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+.env
+
+# Logs & reports
+logs/
+
+# Data & models
+data/
+models/
+features/
+snapshots/
+
+# DVC
+.dvc/
+data/dvc/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store

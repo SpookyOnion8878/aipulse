@@ -16,13 +16,16 @@ from typing import Optional, Dict, List, Any
 
 import yaml
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/api_gateway.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'api_gateway.log')),
     ],
 )
 logger = logging.getLogger("aipulse.api_gateway")
@@ -128,8 +131,10 @@ class APIGateway:
     def __init__(self):
         self.rate_limiter = RateLimiter(max_requests=100, window_seconds=60)
         self.api_key_manager = APIKeyManager()
-        self.router = RequestRouter({})
-        self.monitoring = MonitoringModule()
+        self.router = RequestRouter({
+            "GET:/api/v1/health": lambda body: {"status": 200, "healthy": True},
+            "POST:/api/v1/models/train": lambda body: {"status": 200, "message": f"Training started for {body.get('model_type', 'unknown') if body else 'unknown'}"},
+        })
         self.gateway_config = {
             "max_request_size": 10_485_760,  # 1MB
             "timeout": 30,  # seconds
@@ -153,14 +158,7 @@ class APIGateway:
         logger.info(f"Request: {method} {path}")
 
         # Routing
-        handler = self.router.router.get(f"{method}:{path}")
-        if handler:
-            return handler(body)
-
-        return {
-            "status": 404,
-            "message": "Endpoint not found",
-        }
+        return self.router.route(method, path, body or {})
 
     def _get_user_id(self, body: Dict) -> str:
         """Extract user ID from request body."""

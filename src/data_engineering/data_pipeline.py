@@ -17,13 +17,16 @@ from typing import Optional, Dict, List, Any
 import pandas as pd
 import numpy as np
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/data_pipeline.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'data_pipeline.log')),
     ],
 )
 logger = logging.getLogger("aipulse.data_pipeline")
@@ -207,6 +210,8 @@ def main():
         "label": np.random.choice([0, 1], 1000),
         "date": pd.date_range("2024-01-01", periods=1000),
     })
+    os.makedirs("data/raw", exist_ok=True)
+    sample_df.to_csv("data/raw/sample.csv", index=False)
 
     result = pipeline.run("sample", "data/raw/sample.csv")
     print(f"Pipeline complete. Processed {len(result)} rows.")

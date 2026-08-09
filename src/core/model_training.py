@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import time
+import random
 import logging
 import copy
 from datetime import datetime
@@ -19,13 +20,16 @@ import pandas as pd
 import numpy as np
 import yaml
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs', 'model_training.log')),
+        logging.FileHandler(os.path.join(LOG_DIR, 'model_training.log')),
     ],
 )
 logger = logging.getLogger("aipulse.model_training")
@@ -77,8 +81,8 @@ class ModelTrainer:
     def prepare_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         """Prepare data for training."""
         logger.info(f"Preparing data for {self.config.model_type} model")
-        X = df.drop(columns=["label"])
-        y = df["label"]
+        X = df.drop(columns=["label"]).select_dtypes(include=[np.number])
+        y = df["label"].astype(int)
 
         # Normalize features
         X = (X - X.mean()) / (X.std() + 1e-8)
@@ -199,9 +203,9 @@ class ModelEvaluator:
         precision = self._calculate_precision(predicted, y_val)
         recall = self._calculate_recall(predicted, y_val)
         f1_score = self._calculate_f1(predicted, y_val)
-        mse = self._calculate_mse(X_val, y_val)
-        rmse = self._calculate_rmse(X_val, y_val)
-        mae = self._calculate_mae(X_val, y_val)
+        mse = self._calculate_mse(predicted, y_val)
+        rmse = self._calculate_rmse(predicted, y_val)
+        mae = self._calculate_mae(predicted, y_val)
 
         metrics = {
             "accuracy": accuracy,
@@ -241,14 +245,14 @@ class ModelEvaluator:
         r = self._calculate_recall(pred, y)
         return 2 * (p * r) / (p + r) if (p + r) > 0 else 0.0
 
-    def _calculate_mse(self, X: pd.DataFrame, y: pd.Series) -> float:
-        return np.mean((X.values - y.values) ** 2)
+    def _calculate_mse(self, pred: np.ndarray, y: pd.Series) -> float:
+        return float(np.mean((pred - y.values) ** 2))
 
-    def _calculate_rmse(self, X: pd.DataFrame, y: pd.Series) -> float:
-        return np.sqrt(self._calculate_mse(X, y))
+    def _calculate_rmse(self, pred: np.ndarray, y: pd.Series) -> float:
+        return float(np.sqrt(self._calculate_mse(pred, y)))
 
-    def _calculate_mae(self, X: pd.DataFrame, y: pd.Series) -> float:
-        return np.mean(np.abs(X.values - y.values))
+    def _calculate_mae(self, pred: np.ndarray, y: pd.Series) -> float:
+        return float(np.mean(np.abs(pred - y.values)))
 
 
 class ModelRegistry:

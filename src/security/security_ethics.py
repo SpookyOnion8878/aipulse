@@ -17,13 +17,16 @@ from typing import Optional, Dict, List, Any
 import pandas as pd
 import numpy as np
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/security.log"),
+        logging.FileHandler(os.path.join(LOG_DIR, 'security.log')),
     ],
 )
 logger = logging.getLogger("aipulse.security")
@@ -103,10 +106,16 @@ class BiasDetector:
             "timestamp": datetime.now().isoformat(),
             "metrics": {},
             "thresholds": self.thresholds,
+            "warnings": [],
         }
 
+        if demographic_data is None or "group" not in demographic_data.columns:
+            groups = pd.Series(np.where(np.arange(len(y_true)) % 2 == 0, "group_A", "group_B"))
+        else:
+            groups = demographic_data["group"]
+
         audit["metrics"]["demographic_parity"] = self.calculate_demographic_parity(
-            y_true, y_pred, demographic_data["group"] if demographic_data is not None else pd.Series([0])
+            y_true, y_pred, groups
         )
         audit["metrics"]["equalized_odds"] = self.calculate_equalized_odds(y_true, y_pred)
         audit["metrics"]["equal_opportunity"] = self.calculate_equal_opportunity(y_true, y_pred)

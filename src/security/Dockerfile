@@ -8,7 +8,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/security/ ./src/security/
-COPY data/ ./data/
 
 EXPOSE 8003
 

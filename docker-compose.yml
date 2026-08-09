@@ -170,3 +170,8 @@ services:
     volumes:
       - minio-data:/data
     restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

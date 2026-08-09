@@ -1,8 +1,6 @@
 # AIPulse Enterprise AI Platform — Docker Compose
 # Last Updated: 2026-08-09
 
-version: "3.8"
-
 services:
   # API Gateway
   api-gateway:
@@ -77,57 +75,6 @@ services:
       - ./data/processed:/data/processed
     restart: unless-stopped
 
-  # Monitoring
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    restart: unless-stopped
-
-  # Grafana
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning
-    restart: unless-stopped
-
-  # InfluxDB (time-series)
-  influxdb:
-    image: influxdb:1.8
-    ports:
-      - "8086:8086"
-    environment:
-      - ADMIN_INITIAL_PASSWORD=admin
-    volumes:
-      - influxdb-data:/var/lib/influxdb
-    restart: unless-stopped
-
-  # Elasticsearch (logging)
-  elasticsearch:
-    image: elasticsearch:8.8.0
-    ports:
-      - "9200:9200"
-    environment:
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-    volumes:
-      - elasticsearch-data:/usr/share/elasticsearch/data
-    restart: unless-stopped
-
-  # Redis (caching)
-  redis:
-    image: redis:7.0.0
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-
   # Postgres (metadata)
   postgres:
     image: postgres:16-alpine
@@ -139,6 +86,15 @@ services:
       - POSTGRES_DB=aipulse
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Redis (caching)
+  redis:
+    image: redis:7.0.0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
     restart: unless-stopped
 
   # Training Worker
@@ -161,23 +117,6 @@ services:
             - driver: nvidia
               count: 4
               capabilities: [gpu]
-    restart: unless-stopped
-
-  # Training Runner
-  training-runner:
-    build:
-      context: ./src/core
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - TRAINING_MODE=distributed
-      - TRAINING_NODES=4
-    volumes:
-      - ./data/raw:/data/raw
-      - ./models:/models
-    depends_on:
-      - postgres
     restart: unless-stopped
 
   # AI Ethics Scanner
@@ -231,20 +170,3 @@ services:
     volumes:
       - minio-data:/data
     restart: unless-stopped
-
-  # Log Aggregation
-  log-aggregator:
-    image: elastic/beats:8.8.0
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./logs:/usr/share/elasticsearch/logs
-    restart: unless-stopped
-
-volumes:
-  influxdb-data:
-  elasticsearch-data:
-  redis-data:
-  postgres-data:
-  minio-data:
-  redis-data:

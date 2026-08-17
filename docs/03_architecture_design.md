@@ -1,153 +1,62 @@
-# Architecture Design — AIPulse Enterprise AI Platform
+# Desain arsitektur AIPulse
 
-## System Architecture Diagram
+## Bentuk sistem saat ini
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        AIPulse Enterprise AI Platform                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐   │
-│  │  Frontend    │   │  API Gateway │   │  Orchestration Layer     │   │
-│  │  (Streamlit) │──▶│  (FastAPI)   │──▶│  (Airflow + K8s)         │   │
-│  └──────────────┘   └──────────────┘   └──────────────────────────┘   │
-│          │                │                   │               │         │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐   │
-│  │  Model Store │   │  Feature Store│   │  Model Registry           │   │
-│  │  (S3/GCS)    │   │  (Feast)     │   │  (MLflow)                 │   │
-│  └──────────────┘   └──────────────┘   └──────────────────────────┘   │
-│          │                │                   │               │         │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐   │
-│  │  Security    │   │  Data Pipeline│   │  Monitoring & Alerting    │   │
-│  │  Layer       │   │  (ETL/ELT)   │   │  (Prometheus + Grafana)  │   │
-│  └──────────────┘   └──────────────┘   └──────────────────────────┘   │
-│                                                                           │
-└─────────────────────────────────────────────────────────────────────────┘
+AIPulse adalah modular monolith. Satu image dapat menjalankan API atau salah satu UI; ketiganya
+berbagi kontrak package dan, melalui volume API, penyimpanan file lokal.
+
+```mermaid
+flowchart TB
+    user["Operator"] --> dashboard["Dashboard :8080"]
+    engineer["ML engineer"] --> admin["Admin :8081"]
+    dashboard -->|"Bearer JWT + HTTP"| api["FastAPI :8000"]
+    admin -->|"Bearer JWT + HTTP"| api
+    api --> auth["JWT + RBAC"]
+    api --> limiter["Bounded in-process limiter"]
+    api --> training["Training service"]
+    training --> data["Processed data"]
+    training --> model["Joblib artifacts"]
+    training --> registry["Atomic JSON registry"]
+    api --> audit["Hash-chained JSONL audit"]
 ```
 
-## Layer Breakdown
+## Boundary dan aliran data
 
-### Layer 1: Frontend (Client-facing)
-- **Streamlit** dashboards for data scientists
-- **Admin Panel** for role-based access control
-- **Compliance Dashboard** for audit & ethics tracking
+1. Pipeline membaca raw CSV/Parquet, membersihkan data, dan menulis processed Parquet.
+2. Endpoint training memvalidasi nama dataset agar tidak keluar dari processed-data directory.
+3. Training service membagi dataset sebelum fitting preprocessing dan estimator.
+4. Evaluator menghasilkan metrik dan release gate; hasil gagal tetap dapat disimpan sebagai candidate.
+5. Artefak ditulis atomik, dihitung SHA-256, lalu metadata ditambahkan ke registry.
+6. API menulis outcome ke audit trail dan mengembalikan hasil ke admin console.
+7. Dashboard membaca health dan registry hanya melalui API.
 
-### Layer 2: API Gateway (Entry point)
-- **FastAPI** — REST API with rate limiting
-- **gRPC** — internal high-performance communication
-- **OAuth2** — authentication & authorization
-- **JWT** — token-based auth
+## Security boundary
 
-### Layer 3: Orchestration Layer
-- **Airflow** — workflow orchestration
-- **Kubernetes** — container orchestration
-- **K8s Operators** — AI-specific operators (model deployment, scaling)
+- Health endpoint bersifat publik dan tidak mengungkap secret.
+- Endpoint registry memerlukan role baca; training memerlukan `ml_engineer` atau `admin`.
+- JWT wajib memuat expiry, issued-at, issuer, audience, dan subject.
+- Request model melarang field ekstra dan membatasi pola identifier/path.
+- Rate limit dihitung per subject dan endpoint, dengan jumlah principal yang dibatasi.
+- CORS hanya aktif untuk origin yang dikonfigurasi.
+- Container berjalan sebagai UID/GID non-root dan memakai `no-new-privileges` di Compose.
 
-### Layer 4: Data & Model Services
-- **Feature Store** — Feast (online + offline)
-- **Model Registry** — MLflow (model versioning, tracking)
-- **Training Pipeline** — PyTorch training with DVC versioning
+Audit hash chain mendeteksi modifikasi, tetapi file lokal bukan immutable storage. Untuk kebutuhan
+regulator, kirim audit event ke append-only/WORM storage dengan retention dan access control resmi.
 
-### Layer 5: Security & Compliance Layer
-- **Bias Detection** — fairness metrics (demographic parity, equalized odds)
-- **Audit Trail** — SHAP explainability, model explainability
-- **Compliance** — GDPR, EU AI Act, data anonymization
-- **Security** — input sanitization, model poisoning detection, IAM
+## Konsistensi dan concurrency
 
-### Layer 6: Monitoring & Observability
-- **Prometheus** — metrics collection
-- **Grafana** — dashboards & alerting
-- **ELK Stack** — centralized logging
-- **Sentry** — error tracking
+Registry serta file store memakai lock in-process dan atomic replace. Karena lock tidak
+terdistribusi, API sengaja dijalankan dengan satu worker. Multi-worker/multi-replica memerlukan
+database dengan transaction/unique constraints dan distributed rate limiter.
 
-## Data Flow
+Training saat ini sinkron. Dataset besar akan menahan request dan resource API; production harus
+memindahkan training ke job queue/worker serta menambahkan idempotency key dan status endpoint.
 
-```
-Raw Data → ETL Pipeline → Feature Store → Model Training → Model Registry → API → Frontend
-```
+## Jalur evolusi yang disarankan
 
-### Data Flow (End-to-End)
-1. **Data Ingestion**: Raw data from multiple sources (databases, APIs, streaming)
-2. **ETL Processing**: Clean, transform, validate data
-3. **Feature Store**: Online/offline feature retrieval
-4. **Training**: Data → Features → Model → Model Registry
-5. **Serving**: API Gateway → Model → Response
-6. **Monitoring**: Metrics → Dashboard → Alert
-7. **Security**: Audit logs → Compliance → Monitoring
-
-## Tech Stack Summary
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Frontend | Streamlit | Dashboard & reporting |
-| API | FastAPI + gRPC | REST + internal RPC |
-| Orchestration | Airflow + Kubernetes | Workflow mgmt |
-| Data | Feast + DVC + Spark | Feature store & versioning |
-| Model | PyTorch + MLflow | Training & registry |
-| Security | OAuth2 + JWT + SHAP | Auth, explainability |
-| Monitoring | Prometheus + Grafana + ELK | Metrics & logging |
-
-## Deployment Architecture
-
-### Local Development
-```
-docker-compose up
-```
-
-### Production
-```
-docker-compose up --build
-kubectl apply -f k8s/
-```
-
-### Scaling
-- Horizontal Pod Autoscaler for inference endpoints
-- Read replicas for feature store queries
-- Kubernetes namespace per team
-
-## DevOps
-
-### CI/CD Pipeline
-```yaml
-# .github/workflows/deploy.yml
-- Trigger: push to main
-- Steps:
-  1. Lint & type check
-  2. Unit tests
-  3. Integration tests
-  4. Build Docker image
-  5. Push to registry
-  6. Deploy to staging
-  7. Run integration tests
-  8. Deploy to production
-```
-
-### Infrastructure as Code
-- **Terraform** — infrastructure provisioning
-- **Ansible** — configuration management
-- **Kubernetes** — container orchestration
-
-## Security Architecture
-
-### Authentication & Authorization
-- **OAuth2** + **OpenID Connect**
-- **JWT** — token-based authentication
-- **RBAC** — role-based access control
-- **API Keys** — service-to-service auth
-
-### Data Security
-- **Encryption at rest** — AES-256
-- **Encryption in transit** — TLS 1.3
-- **Data anonymization** — PII masking
-- **Audit logging** — immutable audit trails
-
-### Model Security
-- **Input validation** — sanitization of prompts
-- **Model poisoning detection** — anomaly detection
-- **Output filtering** — preventing data leakage
-- **RBAC** — model access control per user
-
-### Compliance
-- **GDPR** — data privacy, right to erasure
-- **EU AI Act** — AI transparency, risk assessment
-- **Audit trails** — immutable logs for all AI decisions
+1. External OIDC/JWKS dan secret manager dengan key rotation.
+2. PostgreSQL untuk registry/jobs dan object storage untuk dataset/model.
+3. Queue/worker untuk training, retry policy, cancellation, dan idempotency.
+4. OpenTelemetry metrics/traces/logs dan alerting berbasis SLO.
+5. Backup/restore drill, artifact signing, SBOM, dan vulnerability scanning.
+6. Deployment orchestration hanya setelah kebutuhan scaling terukur.

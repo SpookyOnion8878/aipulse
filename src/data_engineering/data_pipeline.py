@@ -1,220 +1,195 @@
-"""
-Data Pipeline — Step 3: Data Engineering
+"""Deterministic data ingestion and validation pipeline.
 
-AIPulse Enterprise AI Platform — Data Pipeline Layer
-Handles second-stage data processing for model training data.
+Learned encoders and scalers deliberately live in the model pipeline so they
+are fit on training data only and serialized with the model artifact.
 """
 
-import os
-import sys
+from __future__ import annotations
+
+import argparse
 import json
-import time
-import logging
-from datetime import datetime
+import os
+import tempfile
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
+from ..logging_config import configure_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, 'data_pipeline.log')),
-    ],
-)
-logger = logging.getLogger("aipulse.data_pipeline")
+
+class DataValidationError(ValueError):
+    """Raised when input data violates the pipeline contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class DataPipelineConfig:
+    label_column: str = "label"
+    drop_duplicates: bool = True
+    clip_numeric_outliers: bool = True
+    outlier_iqr_multiplier: float = 3.0
+    minimum_rows: int = 20
+
+
+@dataclass(slots=True)
+class DataQualityReport:
+    source: str
+    rows_before: int
+    rows_after: int
+    duplicates_removed: int
+    filled_values: dict[str, int] = field(default_factory=dict)
+    clipped_values: dict[str, int] = field(default_factory=dict)
+    derived_date_columns: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class DataPipeline:
-    """Data processing pipeline for model training."""
+    """Clean raw tabular data without fitting model-time transformations."""
 
-    def __init__(self, config: Dict = None):
-        self.config = config or {}
-        self.data_sources = []
-        self.transformations = []
+    def __init__(self, config: DataPipelineConfig | None = None) -> None:
+        self.config = config or DataPipelineConfig()
+        self.last_report: DataQualityReport | None = None
 
-    def load_data(self, source: str, filepath: str) -> pd.DataFrame:
-        """Load data from various sources."""
-        ext = Path(filepath).suffix.lower()
+    @staticmethod
+    def load_data(path: str | Path) -> pd.DataFrame:
+        source = Path(path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Data source not found: {source}")
+        suffix = source.suffix.lower()
+        if suffix == ".csv":
+            return pd.read_csv(source)
+        if suffix in {".parquet", ".pandas"}:
+            return pd.read_parquet(source)
+        if suffix in {".json", ".jsonl"}:
+            return pd.read_json(source, lines=suffix == ".jsonl")
+        raise DataValidationError(f"Unsupported data format: {suffix}")
 
-        if ext == ".csv":
-            df = pd.read_csv(filepath, parse_dates=True)
-            logger.info(f"Loaded CSV: {filepath} ({len(df)} rows)")
-        elif ext in (".json", ".jsonl"):
-            df = pd.read_json(filepath, orient='records')
-            logger.info(f"Loaded JSON: {filepath} ({len(df)} rows)")
-        elif ext == ".parquet":
-            df = pd.read_parquet(filepath)
-            logger.info(f"Loaded Parquet: {filepath} ({len(df)} rows)")
-        elif ext == ".pandas":
-            df = pd.read_parquet(filepath)
-            logger.info(f"Loaded Pandas: {filepath} ({len(df)} rows)")
-        else:
-            raise ValueError(f"Unsupported format: {ext}")
+    def _validate_input(self, frame: pd.DataFrame) -> None:
+        if frame.empty:
+            raise DataValidationError("Dataset is empty")
+        if len(frame) < self.config.minimum_rows:
+            raise DataValidationError(
+                f"Dataset has {len(frame)} rows; minimum is {self.config.minimum_rows}"
+            )
+        if not frame.columns.is_unique:
+            raise DataValidationError("Dataset contains duplicate column names")
+        if self.config.label_column not in frame.columns:
+            raise DataValidationError(f"Missing label column: {self.config.label_column}")
+        if frame[self.config.label_column].isna().any():
+            raise DataValidationError("Label column contains missing values")
+        all_null = frame.columns[frame.isna().all()].tolist()
+        if all_null:
+            raise DataValidationError(f"All-null columns are not allowed: {all_null}")
 
-        self.data_sources.append({
-            "source": source,
-            "file": filepath,
-            "rows": len(df),
-            "columns": list(df.columns),
-            "type": ext,
-        })
+    def transform(self, frame: pd.DataFrame, *, source: str = "in-memory") -> pd.DataFrame:
+        self._validate_input(frame)
+        result = frame.copy(deep=True)
+        rows_before = len(result)
+        if self.config.drop_duplicates:
+            result = result.drop_duplicates().reset_index(drop=True)
+        report = DataQualityReport(
+            source=source,
+            rows_before=rows_before,
+            rows_after=len(result),
+            duplicates_removed=rows_before - len(result),
+        )
 
-        return df
+        date_candidates = [
+            column
+            for column in result.select_dtypes(include=["object", "string"]).columns
+            if "date" in column.lower() or "time" in column.lower()
+        ]
+        for column in date_candidates:
+            parsed = pd.to_datetime(result[column], errors="coerce", utc=True)
+            valid_ratio = float(parsed.notna().mean())
+            if valid_ratio < 0.95:
+                report.warnings.append(
+                    f"{column} was not expanded as a date ({valid_ratio:.1%} valid values)"
+                )
+                continue
+            result[f"{column}_year"] = parsed.dt.year
+            result[f"{column}_month"] = parsed.dt.month
+            result[f"{column}_day"] = parsed.dt.day
+            result[f"{column}_dayofweek"] = parsed.dt.dayofweek
+            result.drop(columns=[column], inplace=True)
+            report.derived_date_columns.append(column)
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply transformations to the data."""
-        # 1. Handle missing values
-        df = self._handle_missing(df)
+        feature_columns = [
+            column for column in result.columns if column != self.config.label_column
+        ]
+        numeric_columns = result[feature_columns].select_dtypes(include="number").columns
+        for column in numeric_columns:
+            result[column] = result[column].replace([np.inf, -np.inf], np.nan)
+            missing = int(result[column].isna().sum())
+            if missing:
+                result[column] = result[column].fillna(result[column].median())
+                report.filled_values[column] = missing
+            if self.config.clip_numeric_outliers:
+                q1 = float(result[column].quantile(0.25))
+                q3 = float(result[column].quantile(0.75))
+                iqr = q3 - q1
+                if iqr > 0:
+                    lower = q1 - self.config.outlier_iqr_multiplier * iqr
+                    upper = q3 + self.config.outlier_iqr_multiplier * iqr
+                    changed = int(((result[column] < lower) | (result[column] > upper)).sum())
+                    if changed:
+                        result[column] = result[column].clip(lower, upper)
+                        report.clipped_values[column] = changed
 
-        # 2. Handle duplicates
-        df = self._handle_duplicates(df)
+        categorical_columns = [
+            column for column in feature_columns if column not in numeric_columns
+        ]
+        for column in categorical_columns:
+            missing = int(result[column].isna().sum())
+            if missing:
+                result[column] = result[column].fillna("__missing__")
+                report.filled_values[column] = missing
 
-        # 3. Remove outliers
-        df = self._handle_outliers(df)
+        if result.isna().any().any():
+            columns = result.columns[result.isna().any()].tolist()
+            raise DataValidationError(f"Null values remain after cleaning: {columns}")
+        report.rows_after = len(result)
+        self.last_report = report
+        return result
 
-        # 4. Normalize numerical columns
-        df = self._normalize(df)
-
-        # 5. Encode categorical variables
-        df = self._encode_categorical(df)
-
-        # 6. Create derived features
-        df = self._create_features(df)
-
-        return df
-
-    def _handle_missing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle missing values."""
-        for col in df.columns:
-            if df[col].dtype in ['float64', 'int64', 'float32']:
-                df[col] = df[col].fillna(df[col].median())
-                logger.info(f"Filled missing values in '{col}' with median")
-            elif df[col].dtype == 'object':
-                df[col] = df[col].fillna(df[col].mode()[0])
-                logger.info(f"Filled missing values in '{col}' with mode")
-        return df
-
-    def _handle_duplicates(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Remove duplicate rows."""
-        before = len(df)
-        df = df.drop_duplicates()
-        after = len(df)
-        logger.info(f"Removed {before - after} duplicate rows")
-        return df
-
-    def _handle_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Remove outliers using IQR method."""
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        for col in numeric_cols:
-            Q1 = df[col].quantile(0.25)
-            Q3 = df[col].quantile(0.75)
-            IQR = Q3 - Q1
-            lower = Q1 - 1.5 * IQR
-            upper = Q3 + 1.5 * IQR
-            outliers = (df[col] < lower) | (df[col] > upper)
-            n_outliers = outliers.sum()
-            if n_outliers > 0:
-                df.loc[outliers, col] = np.nan
-                logger.info(f"Replaced {n_outliers} outliers in '{col}' with NaN")
-        return df
-
-    def _normalize(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize numerical columns to [0, 1] range."""
-        for col in df.select_dtypes(include=['number']).columns:
-            min_val = df[col].min()
-            max_val = df[col].max()
-            if max_val > min_val:
-                df[col] = (df[col] - min_val) / (max_val - min_val)
-                logger.info(f"Normalized column '{col}'")
-        return df
-
-    def _encode_categorical(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Encode categorical variables."""
-        for col in df.select_dtypes(include=['object', 'category']).columns:
-            n_unique = df[col].nunique()
-            if n_unique <= 20:
-                df[col] = df[col].astype('category').cat.codes
-                logger.info(f"Encoded '{col}' using label encoding ({n_unique} unique values)")
-            else:
-                df[col] = df[col].astype('category').cat.codes
-                logger.info(f"Encoded '{col}' using label encoding (high cardinality)")
-        return df
-
-    def _create_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create derived features."""
-        # Convert date columns
-        date_cols = [c for c in df.columns if 'date' in c.lower() or 'time' in c.lower()]
-        for col in date_cols:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col])
-                df[f"{col}_year"] = df[col].dt.year
-                df[f"{col}_month"] = df[col].dt.month
-                df[f"{col}_day"] = df[col].dt.day
-                df[f"{col}_hour"] = df[col].dt.hour
-                df[f"{col}_dayofweek"] = df[col].dt.dayofweek
-                logger.info(f"Created features from '{col}'")
-
-        # Create interaction features
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        for i, col1 in enumerate(numeric_cols):
-            for col2 in numeric_cols[i + 1:]:
-                df[f"{col1}_with_{col2}"] = df[col1] * df[col2]
-                logger.info(f"Created interaction feature: {col1} * {col2}")
-
-        return df
-
-    def run(self, source: str, filepath: str, output_path: str = "data/processed") -> pd.DataFrame:
-        """Run the complete data pipeline."""
-        logger.info(f"Starting pipeline: {source} -> {filepath}")
-
-        # Load
-        df = self.load_data(source, filepath)
-
-        # Transform
-        df = self.transform(df)
-
-        # Store
-        os.makedirs(output_path, exist_ok=True)
-        output_file = os.path.join(output_path, f"{Path(filepath).stem}.processed.parquet")
-        df.to_parquet(output_file, index=False)
-        logger.info(f"Pipeline complete. Saved to {output_file}")
-
-        return df
+    def run(self, source_path: str | Path, output_dir: str | Path) -> Path:
+        source = Path(source_path).resolve()
+        frame = self.load_data(source)
+        transformed = self.transform(frame, source=str(source))
+        destination_dir = Path(output_dir).resolve()
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{source.stem}.processed.parquet"
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{destination.stem}.", suffix=".parquet", dir=destination_dir
+        )
+        os.close(descriptor)
+        try:
+            transformed.to_parquet(temp_name, index=False)
+            os.replace(temp_name, destination)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+        if self.last_report is not None:
+            report_path = destination.with_suffix(".quality.json")
+            report_path.write_text(
+                json.dumps(asdict(self.last_report), indent=2, sort_keys=True), encoding="utf-8"
+            )
+        return destination
 
 
-# Entry point
-def main():
-    """Run the data pipeline."""
-    pipeline = DataPipeline(
-        config={
-            "source": "data/raw",
-            "output": "data/processed",
-            "batch_size": 1000,
-        }
-    )
-
-    # Process sample data
-    sample_df = pd.DataFrame({
-        "id": range(1000),
-        "value1": np.random.randn(1000),
-        "value2": np.random.randn(1000),
-        "category": np.random.choice(["A", "B", "C"], 1000),
-        "label": np.random.choice([0, 1], 1000),
-        "date": pd.date_range("2024-01-01", periods=1000),
-    })
-    os.makedirs("data/raw", exist_ok=True)
-    sample_df.to_csv("data/raw/sample.csv", index=False)
-
-    result = pipeline.run("sample", "data/raw/sample.csv")
-    print(f"Pipeline complete. Processed {len(result)} rows.")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Clean and validate a tabular dataset")
+    parser.add_argument("source")
+    parser.add_argument("--output", default="data/processed")
+    parser.add_argument("--label", default="label")
+    args = parser.parse_args()
+    configure_logging()
+    pipeline = DataPipeline(DataPipelineConfig(label_column=args.label))
+    destination = pipeline.run(args.source, args.output)
+    print(destination)
 
 
 if __name__ == "__main__":

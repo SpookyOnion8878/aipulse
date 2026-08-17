@@ -1,254 +1,168 @@
-"""
-Model Registry — Step 2: System Design (Enterprise)
+"""Atomic local model registry used by the modular-monolith deployment."""
 
-AIPulse Enterprise AI Platform — Model Registry Layer
-Manages model versions, tracking, and deployment lifecycle.
-"""
+from __future__ import annotations
 
-import os
-import sys
+import hashlib
 import json
-import time
-import logging
-from datetime import datetime
+import os
+import re
+import tempfile
+import threading
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any
 
-import yaml
-
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, 'model_registry.log')),
-    ],
-)
-logger = logging.getLogger("aipulse.model_registry")
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _version_key(version: str) -> tuple[int, int, int, int, str]:
+    match = SEMVER.fullmatch(version)
+    if match is None:
+        raise ValueError(f"Invalid semantic version: {version}")
+    major, minor, patch, prerelease = match.groups()
+    return int(major), int(minor), int(patch), 1 if prerelease is None else 0, prerelease or ""
+
+
+@dataclass(frozen=True, slots=True)
 class ModelVersion:
-    """Represents a version of a model."""
-
-    def __init__(
-        self,
-        model_name: str,
-        version: str,
-        metrics: Dict[str, float],
-        artifacts: Dict[str, str],
-        created_at: str = None,
-        tags: List[str] = None,
-        training_data_version: str = None,
-    ):
-        self.model_name = model_name
-        self.version = version
-        self.metrics = metrics
-        self.artifacts = artifacts
-        self.created_at = created_at or datetime.now().isoformat()
-        self.tags = tags or []
-        self.training_data_version = training_data_version
-
-    def to_dict(self) -> Dict:
-        """Convert to dictionary for storage."""
-        return {
-            "model_name": self.model_name,
-            "version": self.version,
-            "metrics": self.metrics,
-            "artifacts": self.artifacts,
-            "created_at": self.created_at,
-            "tags": self.tags,
-            "training_data_version": self.training_data_version,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "ModelVersion":
-        """Create ModelVersion from dictionary."""
-        return cls(
-            model_name=data.get("model_name", ""),
-            version=data.get("version", ""),
-            metrics=data.get("metrics", {}),
-            artifacts=data.get("artifacts", {}),
-            created_at=data.get("created_at", ""),
-            tags=data.get("tags", []),
-            training_data_version=data.get("training_data_version", ""),
-        )
+    model_name: str
+    version: str
+    metrics: dict[str, Any]
+    artifacts: dict[str, str]
+    checksum_sha256: str
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    tags: list[str] = field(default_factory=list)
+    training_data_version: str | None = None
 
 
 class ModelRegistry:
-    """Registry for managing model versions."""
+    """Persist registry metadata with process-local locking and atomic writes."""
 
-    def __init__(
+    def __init__(self, registry_path: str | Path = "models/registry.json") -> None:
+        self.registry_path = Path(registry_path).resolve()
+        self._lock = threading.RLock()
+        self._data = self._load()
+
+    def _empty(self) -> dict[str, Any]:
+        return {"schema_version": 1, "models": {}, "versions": []}
+
+    def _load(self) -> dict[str, Any]:
+        if not self.registry_path.exists():
+            return self._empty()
+        try:
+            data = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid model registry: {self.registry_path}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("models"), dict):
+            raise ValueError("Model registry has an invalid schema")
+        data.setdefault("schema_version", 1)
+        data.setdefault("versions", [])
+        return data
+
+    def _save(self) -> None:
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{self.registry_path.name}.",
+            suffix=".tmp",
+            dir=self.registry_path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(self._data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.registry_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    def register(
         self,
-        registry_path: str = "models/registry.json",
-        storage_path: str = "models/storage",
-    ):
-        self.registry_path = registry_path
-        self.storage_path = storage_path
-        self.registry_data = self._load_registry()
-        self.storage_exists = os.path.exists(self.storage_path)
-
-    def _load_registry(self) -> Dict:
-        """Load registry from file."""
-        if os.path.exists(self.registry_path):
-            with open(self.registry_path, "r") as f:
-                return json.load(f)
-        return {"models": {}, "versions": [], "metadata": {}}
-
-    def _save_registry(self) -> None:
-        """Save registry to file."""
-        os.makedirs(os.path.dirname(self.registry_path), exist_ok=True)
-        with open(self.registry_path, "w") as f:
-            json.dump(self.registry_data, f, indent=2)
-
-    def register(self, model_name: str, version: str, metrics: Dict, artifacts: Dict, tags: List[str] = None) -> str:
-        """Register a new model version."""
-        logger.info(f"Registering model: {model_name} v{version}")
-
-        # Check if version already exists
-        if model_name in self.registry_data["models"]:
-            existing_version = f"{model_name}:{version}"
-            if existing_version in self.registry_data["versions"]:
-                logger.info(f"Model {model_name} v{version} already exists, skipping")
-                return version
-
-        # Create new version
-        version_obj = ModelVersion(
+        model_name: str,
+        version: str,
+        metrics: dict[str, Any],
+        artifacts: dict[str, str],
+        *,
+        checksum_sha256: str,
+        tags: list[str] | None = None,
+        training_data_version: str | None = None,
+    ) -> ModelVersion:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", model_name):
+            raise ValueError("model_name contains unsupported characters")
+        _version_key(version)
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum_sha256):
+            raise ValueError("checksum_sha256 must be a lowercase SHA-256 digest")
+        record = ModelVersion(
             model_name=model_name,
             version=version,
             metrics=metrics,
             artifacts=artifacts,
+            checksum_sha256=checksum_sha256,
             tags=tags or [],
+            training_data_version=training_data_version,
         )
+        key = f"{model_name}:{version}"
+        with self._lock:
+            models = self._data.setdefault("models", {})
+            versions = self._data.setdefault("versions", [])
+            model_versions = models.setdefault(model_name, {})
+            if version in model_versions:
+                raise ValueError(f"Model version already exists: {key}")
+            model_versions[version] = asdict(record)
+            versions.append(key)
+            self._save()
+        return record
 
-        # Update registry
-        if model_name not in self.registry_data["models"]:
-            self.registry_data["models"][model_name] = {}
+    def get_model(self, model_name: str, version: str | None = None) -> dict[str, Any] | None:
+        with self._lock:
+            versions = self._data.get("models", {}).get(model_name, {})
+            if not versions:
+                return None
+            selected = version or max(versions, key=_version_key)
+            record = versions.get(selected)
+            return dict(record) if isinstance(record, dict) else None
 
-        self.registry_data["models"][model_name][version] = version_obj.to_dict()
-        self.registry_data["versions"].append(f"{model_name}:{version}")
+    def list_models(self, model_name: str | None = None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        with self._lock:
+            for name, versions in self._data.get("models", {}).items():
+                if model_name is not None and name != model_name:
+                    continue
+                for version, record in versions.items():
+                    if isinstance(record, dict):
+                        records.append(dict(record, model_name=name, version=version))
+        return sorted(records, key=lambda item: (item["model_name"], _version_key(item["version"])))
 
-        # Save
-        self._save_registry()
-
-        logger.info(f"Model {model_name} v{version} registered successfully")
-        return version
-
-    def get_model(self, model_name: str, version: Optional[str] = None) -> Optional[Dict]:
-        """Get a model by name and version."""
-        if model_name not in self.registry_data["models"]:
-            return None
-
-        if version:
-            return self.registry_data["models"].get(model_name, {}).get(version)
-
-        # Return the latest version
-        versions = self.registry_data["models"].get(model_name, {})
-        if not versions:
-            return None
-        latest_version = max(versions.keys(), key=lambda v: self._version_to_int(v))
-        return self.registry_data["models"][model_name].get(latest_version)
-
-    def _version_to_int(self, version: str) -> int:
-        """Convert version string to integer for sorting."""
-        parts = version.split(".")
-        return int("".join(parts)) if parts else 0
-
-    def list_models(self, filter_model: Optional[str] = None) -> List[Dict]:
-        """List all models."""
-        if filter_model:
-            return [
-                v for v in self.registry_data["versions"]
-                if v.startswith(f"{filter_model}:")
-            ]
-        return self.registry_data["versions"]
-
-    def delete_model(self, model_name: str, version: Optional[str] = None) -> bool:
-        """Delete a model version."""
-        if model_name not in self.registry_data["models"]:
-            return False
-
-        if version:
-            if version not in self.registry_data["models"][model_name]:
+    def delete_model(self, model_name: str, version: str | None = None) -> bool:
+        with self._lock:
+            models = self._data.get("models", {})
+            if model_name not in models:
                 return False
-            del self.registry_data["models"][model_name][version]
-        else:
-            # Delete all versions
-            self.registry_data["models"].pop(model_name, None)
-
-        self._save_registry()
+            if version is None:
+                del models[model_name]
+                prefix = f"{model_name}:"
+                self._data["versions"] = [
+                    key for key in self._data.get("versions", []) if not key.startswith(prefix)
+                ]
+            else:
+                if version not in models[model_name]:
+                    return False
+                del models[model_name][version]
+                self._data["versions"] = [
+                    key
+                    for key in self._data.get("versions", [])
+                    if key != f"{model_name}:{version}"
+                ]
+                if not models[model_name]:
+                    del models[model_name]
+            self._save()
         return True
-
-    def get_all_metrics(self) -> List[Dict]:
-        """Get all metrics across all models."""
-        all_metrics = []
-        for model_name, versions in self.registry_data["models"].items():
-            for version, data in versions.items():
-                all_metrics.append({
-                    "model_name": model_name,
-                    "version": version,
-                    "metrics": data.get("metrics", {}),
-                })
-        return all_metrics
-
-    def get_model_stats(self, model_name: str) -> Dict:
-        """Get statistics for a model."""
-        versions = self.registry_data["models"].get(model_name, {})
-        if not versions:
-            return {"model_name": model_name, "total_versions": 0, "versions": []}
-
-        total_versions = len(versions)
-        versions_list = list(versions.keys())
-        latest_version = versions_list[-1] if versions_list else ""
-
-        return {
-            "model_name": model_name,
-            "total_versions": total_versions,
-            "latest_version": latest_version,
-            "versions": versions_list,
-        }
-
-
-# Entry point
-def main():
-    """Run model registry."""
-    registry = ModelRegistry(registry_path="models/registry.json", storage_path="models/storage")
-
-    # Register a model
-    metrics = {
-        "accuracy": 0.92,
-        "precision": 0.91,
-        "recall": 0.93,
-        "f1_score": 0.92,
-        "auc_roc": 0.95,
-        "mse": 0.05,
-    }
-
-    version = registry.register(
-        model_name="ai_model",
-        version="1.0.0",
-        metrics=metrics,
-        artifacts={"checkpoint": "models/ai_model/checkpoint.pth", "config": "models/ai_model/config.json"},
-        tags=["production", "lstm"],
-    )
-
-    print(f"Registered model: ai_model v{version}")
-
-    # Get model
-    model = registry.get_model("ai_model")
-    print(f"Model info: {model}")
-
-    # List all models
-    all_models = registry.list_models()
-    print(f"All models: {all_models}")
-
-    # Get model stats
-    stats = registry.get_model_stats("ai_model")
-    print(f"Model stats: {stats}")
-
-
-if __name__ == "__main__":
-    main()

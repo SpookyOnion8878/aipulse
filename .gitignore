@@ -4,25 +4,33 @@ __pycache__/
 *.egg-info/
 venv/
 .venv/
+.venv*/
 .env
 
-# Logs & reports
-logs/
+# Quality tooling
+.pytest_cache/
+.pytest-tmp*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Data & models
+# Logs, runtime data, and models
+logs/
 data/
 models/
 features/
 snapshots/
 
-# DVC
-.dvc/
-data/dvc/
+# Codex temporary replacement files
+*.codex-original
+*.codex-next
+*.codex-pre-*
+*.codex-replaced
 
-# IDE
+# IDE and OS
 .idea/
 .vscode/
-
-# OS
 Thumbs.db
 .DS_Store

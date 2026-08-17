@@ -1,200 +1,108 @@
-"""
-Monitoring Module — Step 1: Core Skills (ML & Deep Learning)
+"""Inference telemetry and statistically meaningful drift checks."""
 
-AIPulse Enterprise AI Platform — Monitoring Layer
-Handles model monitoring, drift detection, and performance tracking.
-"""
+from __future__ import annotations
 
-import os
-import sys
-import json
-import time
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, List, Any
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
-import pandas as pd
 import numpy as np
+import numpy.typing as npt
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, 'monitoring_report.json')),
-    ],
-)
-logger = logging.getLogger("aipulse.monitoring")
+def population_stability_index(
+    reference: npt.ArrayLike,
+    current: npt.ArrayLike,
+    *,
+    bins: int = 10,
+) -> float:
+    """Calculate PSI using quantile buckets learned from reference values."""
+
+    reference_array = np.asarray(reference, dtype=float)
+    current_array = np.asarray(current, dtype=float)
+    reference_array = reference_array[np.isfinite(reference_array)]
+    current_array = current_array[np.isfinite(current_array)]
+    if len(reference_array) < bins or len(current_array) < bins:
+        raise ValueError(f"At least {bins} finite values are required in each sample")
+    edges = np.unique(np.quantile(reference_array, np.linspace(0, 1, bins + 1)))
+    if len(edges) < 3:
+        return 0.0
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    reference_histogram = np.histogram(reference_array, bins=edges)[0] / len(reference_array)
+    current_histogram = np.histogram(current_array, bins=edges)[0] / len(current_array)
+    epsilon = 1e-6
+    reference_ratio = np.clip(reference_histogram, epsilon, None)
+    current_ratio = np.clip(current_histogram, epsilon, None)
+    return float(
+        np.sum((current_ratio - reference_ratio) * np.log(current_ratio / reference_ratio))
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DriftAlert:
+    metric_name: str
+    psi: float
+    threshold: float
+    timestamp: str
 
 
 class MonitoringMetrics:
-    """Track monitoring metrics."""
+    """Keep a bounded in-process metric window for the local deployment."""
 
-    def __init__(self, config: Dict = None):
-        self.config = config or {}
-        self.metrics_history: List[Dict] = []
-        self.drift_alerts: List[Dict] = []
+    def __init__(self, max_points_per_metric: int = 10_000) -> None:
+        self._values: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=max_points_per_metric)
+        )
+        self.drift_alerts: list[DriftAlert] = []
 
-    def track_metric(self, metric_name: str, value: float, metadata: Optional[Dict] = None) -> Dict:
-        """Track a single metric."""
-        metric = {
-            "timestamp": datetime.now().isoformat(),
-            "metric_name": metric_name,
-            "value": value,
-            "metadata": metadata or {},
-        }
-        self.metrics_history.append(metric)
-        logger.info(f"Tracked metric '{metric_name}': {value}")
-        return metric
+    def track_metric(self, metric_name: str, value: float) -> None:
+        if not np.isfinite(value):
+            raise ValueError("Metric value must be finite")
+        self._values[metric_name].append(float(value))
 
-    def compute_rolling_average(self, window: int = 7) -> List[Dict]:
-        """Compute rolling average for metrics."""
-        logger.info(f"Computing rolling average (window={window})")
-        results = []
-        for metric_name in set(m["metric_name"] for m in self.metrics_history):
-            values = [m["value"] for m in self.metrics_history if m["metric_name"] == metric_name]
-            if len(values) >= window:
-                rolling = []
-                for i in range(len(values) - window + 1):
-                    rolling.append({
-                        "timestamp": self.metrics_history[i + window - 1]["timestamp"],
-                        "value": np.mean(values[i:i + window]),
-                        "window_size": window,
-                    })
-                results.extend(rolling)
-        return results
-
-    def detect_drift(self, current_history: Optional[List[Dict]] = None, threshold: float = 0.2) -> List[Dict]:
-        """Detect data drift using PSI (Population Stability Index)."""
-        if current_history is None:
-            current_history = self.metrics_history
-
-        drift_alerts = []
-        for metric_name in set(m["metric_name"] for m in current_history):
-            current_values = [m["value"] for m in current_history if m["metric_name"] == metric_name]
-            if len(current_values) < 2:
-                continue
-
-            # Compare with baseline (first 70% of data)
-            baseline = current_values[:len(current_values) // 3]
-            if len(baseline) < 3:
-                continue
-
-            # Simple drift detection (mean shift)
-            baseline_mean = np.mean(baseline)
-            current_mean = np.mean(current_values)
-            psie = np.sqrt(np.mean(((current_values - baseline_mean) ** 2) / baseline_mean))
-
-            if psie > threshold:
-                drift_alerts.append({
-                    "metric_name": metric_name,
-                    "psie": round(psie, 4),
-                    "baseline_mean": round(baseline_mean, 4),
-                    "current_mean": round(current_mean, 4),
-                    "threshold": threshold,
-                    "timestamp": datetime.now().isoformat(),
-                })
-                logger.warning(f"Drift detected for '{metric_name}': PSI={psie:.4f}")
-
-        return drift_alerts
-
-    def compute_model_health(self) -> Dict[str, Any]:
-        """Compute model health score."""
-        total = len(self.metrics_history)
-        if total == 0:
-            return {"health_score": 0.0, "status": "no_data", "reason": "No metrics tracked"}
-
-        # Count positive metrics
-        total = len(self.metrics_history)
-        avg = np.mean([m["value"] for m in self.metrics_history])
-        std = np.std([m["value"] for m in self.metrics_history])
-
-        # Health score based on consistency
-        consistency = max(0, 1 - std / avg) if avg > 0 else 0
-        health_score = round(consistency * 100, 2)
-
-        status = "healthy" if health_score > 80 else ("degraded" if health_score > 50 else "critical")
-
-        return {
-            "health_score": health_score,
-            "status": status,
-            "avg_value": round(avg, 4),
-            "std_value": round(std, 4),
-            "data_points": total,
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    def generate_report(self, output_path: str = "logs/monitoring_report.json"):
-        """Generate monitoring report."""
-        report = {
-            "timestamp": datetime.now().isoformat(),
-            "metrics_history": self.metrics_history,
-            "drift_alerts": self.drift_alerts,
-            "health_score": self.compute_model_health(),
-        }
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(report, f, indent=2)
-        logger.info(f"Monitoring report saved to {output_path}")
-        return report
+    def detect_drift(
+        self,
+        metric_name: str,
+        reference: npt.ArrayLike,
+        *,
+        threshold: float = 0.2,
+    ) -> DriftAlert | None:
+        current = list(self._values.get(metric_name, ()))
+        psi = population_stability_index(reference, current)
+        if psi <= threshold:
+            return None
+        alert = DriftAlert(metric_name, psi, threshold, datetime.now(UTC).isoformat())
+        self.drift_alerts.append(alert)
+        return alert
 
 
 class InferenceMonitor:
-    """Monitor inference performance."""
+    """Aggregate bounded latency and error telemetry."""
 
-    def __init__(self, config: Dict = None):
-        self.config = config or {}
-        self.inference_latency: List[Dict] = []
-        self.error_count = 0
+    def __init__(self, max_points: int = 10_000) -> None:
+        self._latencies: deque[float] = deque(maxlen=max_points)
         self.total_requests = 0
+        self.error_count = 0
 
-    def record_inference(self, latency_ms: float, success: bool, metadata: Optional[Dict] = None) -> None:
-        """Record inference metrics."""
+    def record_inference(self, latency_ms: float, success: bool) -> None:
+        if latency_ms < 0 or not np.isfinite(latency_ms):
+            raise ValueError("latency_ms must be a finite non-negative value")
         self.total_requests += 1
-        if not success:
-            self.error_count += 1
-        self.inference_latency.append({
-            "timestamp": datetime.now().isoformat(),
-            "latency_ms": latency_ms,
-            "success": success,
-            "metadata": metadata or {},
-        })
+        self.error_count += int(not success)
+        self._latencies.append(float(latency_ms))
 
-        # Log every 100 requests
-        if self.total_requests % 100 == 0:
-            self._log_summary()
-
-    def _log_summary(self) -> None:
-        """Log inference summary."""
-        total = len(self.inference_latency)
-        if total == 0:
-            return
-        avg_latency = np.mean([m["latency_ms"] for m in self.inference_latency])
-        error_rate = self.error_count / total
-        logger.info(f"Inference Summary: {total} requests, avg latency: {avg_latency:.2f}ms, error rate: {error_rate:.4f}")
-
-
-# Entry point
-def main():
-    """Run monitoring module."""
-    monitor = MonitoringMetrics()
-
-    # Simulate tracking metrics
-    for i in range(50):
-        monitor.track_metric("accuracy", 0.85 + np.random.rand() * 0.1, {"iteration": i})
-
-    # Detect drift
-    drift_alerts = monitor.detect_drift()
-
-    # Generate report
-    report = monitor.generate_report("logs/monitoring_report.json")
-    print(f"Monitoring report generated with {len(drift_alerts)} drift alerts")
-
-
-if __name__ == "__main__":
-    main()
+    def summary(self) -> dict[str, Any]:
+        if not self._latencies:
+            return {"status": "no_data", "total_requests": self.total_requests}
+        values = np.asarray(self._latencies)
+        return {
+            "status": "ok",
+            "total_requests": self.total_requests,
+            "window_requests": len(values),
+            "error_rate": self.error_count / self.total_requests,
+            "latency_ms_avg": float(np.mean(values)),
+            "latency_ms_p95": float(np.percentile(values, 95)),
+            "timestamp": datetime.now(UTC).isoformat(),
+        }

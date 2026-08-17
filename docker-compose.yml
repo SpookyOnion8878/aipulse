@@ -1,177 +1,112 @@
-# AIPulse Enterprise AI Platform — Docker Compose
-# Last Updated: 2026-08-09
+name: aipulse
+
+x-aipulse-image: &aipulse-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: aipulse:local
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
 
 services:
-  # API Gateway
-  api-gateway:
-    build:
-      context: ./src/system
-      dockerfile: Dockerfile
+  api:
+    <<: *aipulse-image
     ports:
-      - "8000:8000"
-      - "8001:8001"
+      - "127.0.0.1:8000:8000"
     environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - MODEL_CACHE_PATH=/data/models
+      AIPULSE_ENV: ${AIPULSE_ENV:-development}
+      AIPULSE_JWT_SECRET: ${AIPULSE_JWT_SECRET:-}
+      AIPULSE_JWT_ISSUER: ${AIPULSE_JWT_ISSUER:-aipulse}
+      AIPULSE_JWT_AUDIENCE: ${AIPULSE_JWT_AUDIENCE:-aipulse-api}
+      AIPULSE_CORS_ORIGINS: ${AIPULSE_CORS_ORIGINS:-http://localhost:8080,http://localhost:8081}
+      AIPULSE_DATA_DIR: /app/data
+      AIPULSE_MODELS_DIR: /app/models
+      AIPULSE_LOGS_DIR: /app/logs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - ./data/raw:/data/raw
-      - ./data/processed:/data/processed
-      - ./models:/models
-      - ./logs:/logs
-    restart: unless-stopped
-    depends_on:
-      - model-serving
-      - feature-store
-      - postgres
-      - redis
-
-  # Model Serving
-  model-serving:
-    build:
-      context: ./src/core
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - MODEL_MODEL_NAME=ai_model
-      - MODEL_MODEL_PATH=/models/ai_model
-    volumes:
-      - ./models:/models
-      - ./data/raw:/data/raw
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # Feature Store
-  feature-store:
-    build:
-      context: ./src/data_engineering
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - FEAST_INGESTION_INTERVAL=60
-      - FEAST_OFFLINE_PATH=/features/offline
-      - FEAST_ONLINE_PATH=/features/online
-    volumes:
-      - ./data/processed:/features/online
-      - ./data/dvc:/features/offline
-    restart: unless-stopped
-
-  # Data Ingestion
-  data-ingestion:
-    build:
-      context: ./src/data_engineering
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - DATA_SOURCE_PATH=/data/raw
-      - DATA_OUTPUT_PATH=/data/processed
-    volumes:
-      - ./data/raw:/data/raw
-      - ./data/processed:/data/processed
-    restart: unless-stopped
-
-  # Postgres (metadata)
-  postgres:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_USER=admin
-      - POSTGRES_PASSWORD=admin
-      - POSTGRES_DB=aipulse
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  # Redis (caching)
-  redis:
-    image: redis:7.0.0
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-
-  # Training Worker
-  training-worker:
-    build:
-      context: ./src/core
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - GPU_COUNT=4
-      - NVIDIA_VISIBLE_DEVICES=all
-    volumes:
-      - ./data/raw:/data/raw
-      - ./models:/models
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 4
-              capabilities: [gpu]
-    restart: unless-stopped
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
-  # AI Ethics Scanner
-  ai-ethics:
-    build:
-      context: ./src/security
-      dockerfile: Dockerfile
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
-      - ETHICS_THRESHOLD=0.1
-      - COMPLIANCE_MODE=strict
-    volumes:
-      - ./data/raw:/data/raw
-    restart: unless-stopped
-
-  # Frontend Dashboard
   dashboard:
-    build:
-      context: ./src/frontend
-      dockerfile: Dockerfile
+    <<: *aipulse-image
+    command:
+      - streamlit
+      - run
+      - /app/src/frontend/dashboard.py
+      - --server.address=0.0.0.0
+      - --server.port=8080
+      - --server.headless=true
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      - FLASK_ENV=production
-      - LOG_LEVEL=INFO
-    volumes:
-      - ./src/frontend/static:/app/static
-    restart: unless-stopped
+      AIPULSE_API_URL: http://api:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/_stcore/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
-  # Admin Panel
-  admin-panel:
-    build:
-      context: ./src/frontend
-      dockerfile: Dockerfile_admin
+  admin:
+    <<: *aipulse-image
+    command:
+      - streamlit
+      - run
+      - /app/src/frontend/admin_panel.py
+      - --server.address=0.0.0.0
+      - --server.port=8080
+      - --server.headless=true
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     environment:
-      - LOG_LEVEL=INFO
-      - ROLE=admin
-    restart: unless-stopped
-
-  # File Storage
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-    environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=minio123
-    volumes:
-      - minio-data:/data
-    restart: unless-stopped
-
-volumes:
-  postgres-data:
-  redis-data:
-  minio-data:
+      AIPULSE_API_URL: http://api:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/_stcore/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G

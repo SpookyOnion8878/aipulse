@@ -1,141 +1,122 @@
-"""
-Admin Panel — Step 5: Frontend
+"""AIPulse model training console backed by authenticated API calls."""
 
-AIPulse Enterprise AI Platform — Admin Panel
-Role-based management and team administration.
-"""
+from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import datetime
-import json
 import os
-import hashlib
+from typing import TYPE_CHECKING, Any
 
-# Page config
-st.set_page_config(
-    page_title="Admin Panel",
-    page_icon="🔧",
-    layout="wide",
-    initial_sidebar_state="expanded",
+import pandas as pd
+import streamlit as st
+
+if TYPE_CHECKING:
+    from .api_client import APIClient, APIError
+else:
+    from aipulse.frontend.api_client import APIClient, APIError
+
+st.set_page_config(page_title="AIPulse Admin", page_icon="AP", layout="wide")
+st.title("AIPulse Admin Console")
+st.caption("Protected operational actions. Training requests are audited by actor and outcome.")
+
+api_url = st.sidebar.text_input(
+    "API URL", value=os.getenv("AIPULSE_API_URL", "http://localhost:8000")
+)
+access_token = st.sidebar.text_input(
+    "Admin or ML engineer token",
+    type="password",
+    help="A short-lived JWT with the admin or ml_engineer role is required.",
 )
 
-# Sidebar
-st.sidebar.title("🔧 Admin Panel")
+if not access_token:
+    st.warning("Enter an authorized token before performing administrative actions.")
+    st.stop()
 
-st.sidebar.markdown("**Role Management**")
-roles = st.sidebar.multiselect("Select Roles", ["Admin", "Data Scientist", "ML Engineer", "DevOps", "Viewer"], default=["Admin"])
+try:
+    client = APIClient(api_url, access_token)
+    models_response = client.list_models()
+except (APIError, ValueError) as exc:
+    st.error(str(exc))
+    st.stop()
 
-st.sidebar.markdown("**Team Management**")
-team_size = st.sidebar.slider("Team Size", 1, 100, 10)
-team_members = [f"Member_{i}" for i in range(team_size)]
+st.subheader("Train and register a model")
+with st.form("train-model", clear_on_submit=False):
+    left, right = st.columns(2)
+    with left:
+        dataset_name = st.text_input(
+            "Processed dataset filename",
+            placeholder="sample.processed.parquet",
+            help="The file must already exist under the API's data/processed directory.",
+        )
+        model_name = st.text_input("Model name", value="ai_model")
+        label_column = st.text_input("Label column", value="label")
+    with right:
+        model_type = st.selectbox(
+            "Estimator",
+            options=["logistic_regression", "random_forest"],
+            format_func=lambda value: value.replace("_", " ").title(),
+        )
+        validation_fraction = st.slider(
+            "Validation fraction", min_value=0.1, max_value=0.5, value=0.2, step=0.05
+        )
+    confirmation = st.checkbox(
+        "I understand this starts a training job and creates a model artifact."
+    )
+    submitted = st.form_submit_button("Start training", type="primary")
 
-st.sidebar.markdown("**License**")
-license = st.sidebar.selectbox("License", ["Business", "Enterprise", "Free"])
+if submitted and not dataset_name:
+    st.error("Enter a processed dataset filename before starting training.")
+elif submitted and not confirmation:
+    st.error("Confirm that you understand a model artifact will be created.")
+elif submitted:
+    payload: dict[str, Any] = {
+        "dataset_name": dataset_name,
+        "model_name": model_name,
+        "model_type": model_type,
+        "label_column": label_column,
+        "validation_fraction": validation_fraction,
+    }
+    with st.spinner("Training, evaluating, and registering the model…"):
+        try:
+            result = client.train_model(payload)
+        except APIError as exc:
+            if exc.status_code in {401, 403}:
+                st.error("Your token does not authorize model training.")
+            else:
+                st.error(str(exc))
+        else:
+            validation = result.get("validation", {})
+            registration = f"Registered {result.get('model')} version {result.get('version')}"
+            if validation.get("passed"):
+                st.success(f"{registration} as validated.")
+            else:
+                st.warning(f"{registration} as a candidate.")
+                for failure in validation.get("failures", []):
+                    st.write(f"Release gate: {failure}")
+            st.json(
+                {
+                    "metrics": result.get("metrics"),
+                    "checksum_sha256": result.get("checksum_sha256"),
+                    "training_rows": result.get("training_rows"),
+                    "validation_rows": result.get("validation_rows"),
+                }
+            )
+            try:
+                models_response = client.list_models()
+            except APIError:
+                st.warning("Training succeeded, but the registry could not be refreshed.")
 
-st.sidebar.markdown("**Notifications**")
-notifications = st.sidebar.checkbox("Enable Notifications", value=True)
-
-st.sidebar.markdown("**Settings**")
-theme = st.sidebar.selectbox("Theme", ["Light", "Dark"])
-lang = st.sidebar.selectbox("Language", ["English", "Mandarin", "French"])
-
-# Welcome Banner
-st.markdown("# 🛠️ Admin Panel")
-st.markdown("### Role-Based Access Control for AIPulse Platform")
-
-# Dashboard Overview
-st.header("📊 Overview")
-
-# Stats
-total_users = team_size
-total_models = 156
-total_pipelines = 89
-total_issues = 12
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Active Users", f"{total_users} ({role_distribution})")
-col2.metric("Total Models", f"{total_models}")
-col3.metric("Active Pipelines", f"{total_pipelines}")
-
-# Role Distribution
-st.header("👥 Role Distribution")
-role_data = {
-    "Admin": 2,
-    "Data Scientist": 15,
-    "ML Engineer": 30,
-    "DevOps": 12,
-    "Viewer": 45,
-}
-role_df = pd.DataFrame(list(role_data.items()), columns=["Role", "Count"])
-st.dataframe(role_df, use_container_width=True)
-
-# Model Management
-st.header("🚀 Model Management")
-
-model_df = pd.DataFrame({
-    "Model Name": [f"Model_{i}" for i in range(10)],
-    "Type": np.random.choice(["LSTM", "Transformer", "Random Forest"], 10),
-    "Status": ["Active" if np.random.random() > 0.2 else "Inactive" for _ in range(10)],
-    "Accuracy": np.random.uniform(0.85, 0.99, 10).round(4),
-    "Last Updated": pd.date_range("2024-01-01", periods=10)[:10],
-})
-
-st.dataframe(model_df, use_container_width=True)
-
-# Team Management
-st.header("👥 Team Management")
-
-# Group by role
-grouped = model_df.groupby("Type").size().reset_index(name="Count")
-st.dataframe(grouped, use_container_width=True)
-
-# Model Registry
-st.header("📦 Model Registry")
-
-model_registry_df = pd.DataFrame({
-    "Model": ["Model_1", "Model_2", "Model_3"],
-    "Version": ["1.0.0", "1.1.0", "1.2.0"],
-    "Status": ["Deployed", "Deployed", "In Progress"],
-    "Accuracy": [0.92, 0.94, 0.89],
-    "Environment": ["Production", "Staging", "Development"],
-})
-st.dataframe(model_registry_df, use_container_width=True)
-
-# System Health
-st.header("🏥 System Health")
-
-health_df = pd.DataFrame({
-    "Service": ["API Gateway", "Model Serving", "Feature Store", "Monitoring", "Database", "Storage"],
-    "Status": ["🟢 Healthy", "🟢 Healthy", "🟢 Healthy", "🟢 Healthy", "🟢 Healthy", "🟢 Healthy"],
-    "CPU Usage": ["23%", "15%", "35%", "12%", "40%", "60%"],
-    "Memory Usage": ["45%", "32%", "55%", "28%", "42%", "58%"],
-    "Uptime": ["99.99%", "99.95%", "99.98%", "99.99%", "99.90%", "99.99%"],
-})
-st.dataframe(health_df, use_container_width=True)
-
-# Alerts
-st.header("🚨 Alerts & Notifications")
-
-alert_df = pd.DataFrame({
-    "Alert": ["High latency", "Model drift", "Deployment failed", "Health check failed"],
-    "Severity": ["Warning", "Warning", "Critical", "Info"],
-    "Message": [
-        "Model inference latency > 200ms",
-        "Model distribution shift detected",
-        "Deployment failed due to timeout",
-        "Health check failed for Model_3",
-    ],
-    "Time": ["2 min ago", "15 min ago", "1 hour ago", "3 hours ago"],
-})
-st.dataframe(alert_df, use_container_width=True)
-
-# Audit
-st.header("📋 Audit Trail")
-st.info("All model deployments, access changes, and data updates are logged here.")
-
-# Footer
-st.markdown("---")
-st.markdown("### 📘 AIPulse Enterprise AI Platform v1.0.0")
-st.markdown(f"**Last Updated**: {datetime.now().isoformat()}")
+st.subheader("Registry")
+items = models_response.get("items", [])
+if not items:
+    st.info("The registry is empty.")
+else:
+    registry_rows = [
+        {
+            "Model": item.get("model_name"),
+            "Version": item.get("version"),
+            "Tags": ", ".join(item.get("tags", [])),
+            "Dataset": item.get("training_data_version"),
+            "Created": item.get("created_at"),
+        }
+        for item in items
+    ]
+    st.dataframe(pd.DataFrame(registry_rows), use_container_width=True, hide_index=True)

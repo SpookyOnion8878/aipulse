@@ -1,90 +1,112 @@
-# AIPulse Enterprise AI Platform
+# AIPulse
 
-> Platform end-to-end untuk mengelola lifecycle AI dari development hingga deployment enterprise-grade.
+AIPulse adalah baseline modular untuk lifecycle model klasifikasi tabular: pemrosesan data,
+training dan evaluasi, registry artefak, API terautentikasi, audit log, serta dua UI Streamlit.
+Implementasi ini ditujukan untuk local development dan sebagai fondasi deployment internal;
+bukan klaim sebagai platform enterprise lengkap.
 
-## Konsep
+## Kemampuan utama
 
-AIPulse adalah platform komprehensif yang mencakup seluruh workflow AI:
+- Pipeline data deterministik yang mempertahankan label dan menulis Parquet secara atomik.
+- Training scikit-learn tanpa data leakage, dengan stratified validation split.
+- Metrik klasifikasi yang benar, termasuk AUC dari probability score dan release gate.
+- Registry JSON atomik dengan semantic version ordering dan checksum SHA-256 artefak.
+- FastAPI dengan JWT validation, role-based access, rate limit, CORS allowlist, dan audit log.
+- Fairness, compliance evidence, poisoning, drift, dan inference health checks yang dapat
+  mengembalikan `not_assessed` saat bukti tidak tersedia.
+- Dashboard read-only dan admin console yang hanya berkomunikasi melalui API.
+- Container non-root, health check, resource limit, dan port lokal secara default.
 
-- **Core Skills**: Data Engineering, Model Training & Fine-Tuning, Evaluation, Monitoring
-- **System Design**: Microservices Architecture, API Gateway, Orchestration, Model Registry
-- **Data Engineering**: Feature Store, Data Versioning, Data Pipelines
-- **Security & Ethics**: Bias Detection, Audit Trail, Compliance, Security
-- **Frontend Dashboard**: Monitoring, Admin Panel, Reporting
+## Arsitektur
 
-## Tech Stack
-
-- **Python 3.11+**
-- **PyTorch** — Deep Learning
-- **FastAPI** — REST API
-- **Docker** — Containerization
-- **Kubernetes** — Orchestration
-- **MLflow** — Model Registry
-- **Airflow** — Workflow Orchestration
-- **Feast** — Feature Store
-- **DVC** — Data Versioning
-- **SHAP** — Explainability
-- **LangChain** — LLM Integration
-- **Pandas, PySpark** — Data Processing
-- **SQLAlchemy** — Database ORM
-
-## Struktur Proyek
-
-```
-aipulse/
-├── README.md
-├── requirements.txt
-├── docker-compose.yml
-├── src/
-│   ├── core/
-│   │   ├── data_pipeline.py
-│   │   ├── model_training.py
-│   │   ├── evaluation.py
-│   │   └── monitoring.py
-│   ├── system/
-│   │   ├── api_gateway.py
-│   │   ├── orchestration.py
-│   │   └── model_registry.py
-│   ├── data_engineering/
-│   │   ├── feature_store.py
-│   │   ├── dvc_config.py
-│   │   └── data_pipeline.py
-│   ├── security/
-│   │   ├── bias_detection.py
-│   │   ├── audit_trail.py
-│   │   └── compliance.py
-│   └── frontend/
-│       ├── dashboard.py
-│       └── admin_panel.py
-├── docs/
-│   ├── 01_readme.md
-│   ├── 02_tech_stack.md
-│   └── 03_architecture_design.md
-├── tests/
-└── .gitignore
+```mermaid
+flowchart LR
+    data["Raw/processed data"] --> pipeline["Deterministic pipeline"]
+    pipeline --> training["Training + evaluation"]
+    training --> artifacts["Model artifacts"]
+    training --> registry["Atomic registry"]
+    dashboard["Operations dashboard"] --> api["FastAPI boundary"]
+    admin["Admin console"] --> api
+    api --> training
+    api --> registry
+    api --> audit["Hash-chained audit log"]
 ```
 
-## Cara Menjalankan
+Semua komponen saat ini berjalan sebagai modular monolith dengan penyimpanan berbasis file.
+Lihat [desain arsitektur](docs/03_architecture_design.md) untuk trade-off dan batasannya.
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+## Menjalankan secara lokal
 
-# Build and run Docker compose
-docker-compose up --build
+Prasyarat: Python 3.11–3.14.
 
-# Atau jalankan langsung
-python -m src.core.data_pipeline
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+$env:AIPULSE_JWT_SECRET = "ganti-dengan-secret-random-minimal-32-byte"
+.venv\Scripts\python.exe -m uvicorn aipulse.system.api_gateway:app --reload
 ```
 
-## Dokumentasi
+Jalankan UI pada terminal terpisah:
 
-Setiap step proyek ini memiliki dokumentasi terpisah:
+```powershell
+.venv\Scripts\python.exe -m streamlit run src/frontend/dashboard.py --server.port 8080
+.venv\Scripts\python.exe -m streamlit run src/frontend/admin_panel.py --server.port 8081
+```
 
-- `docs/01_readme.md` — Overview
-- `docs/02_tech_stack.md` — Tech Stack Detail
-- `docs/03_architecture_design.md` — Arsitektur System Design
+API health tersedia tanpa token di `http://localhost:8000/api/v1/health`. Dokumentasi OpenAPI
+tersedia di `/docs` kecuali ketika `AIPULSE_ENV=production`.
 
-## License
+## Token development
 
-MIT
+Tidak ada endpoint yang menerbitkan token. Gunakan identity provider di deployment nyata. Untuk
+local development atau test, buat token singkat melalui helper tepercaya:
+
+```powershell
+$env:AIPULSE_JWT_SECRET = "secret-yang-sama-dengan-api"
+.venv\Scripts\python.exe -c "from aipulse.config import Settings; from aipulse.security.auth import create_access_token; print(create_access_token(Settings.from_env(), 'local-user', ['admin']))"
+```
+
+Role yang diterima:
+
+- `viewer`, `data_scientist`, `ml_engineer`, atau `admin` untuk membaca registry.
+- `ml_engineer` atau `admin` untuk memulai training.
+
+## Docker Compose
+
+```powershell
+$env:AIPULSE_JWT_SECRET = "ganti-dengan-secret-random-minimal-32-byte"
+docker compose up --build
+```
+
+Service hanya diekspos ke loopback host: API `8000`, dashboard `8080`, dan admin `8081`.
+Volume `data/`, `models/`, dan `logs/` bersifat lokal dan diabaikan Git.
+
+## Quality gate
+
+```powershell
+.venv\Scripts\python.exe -m ruff check src tests
+.venv\Scripts\python.exe -m ruff format --check src tests
+.venv\Scripts\python.exe -m mypy
+.venv\Scripts\python.exe -m pytest
+docker compose config --quiet
+docker build -t aipulse:local .
+```
+
+## Struktur penting
+
+- `src/core`: training, evaluasi, dan monitoring.
+- `src/data_engineering`: pipeline, feature store lokal, dan checksummed snapshots.
+- `src/system`: API, registry, dan dependency-aware orchestration.
+- `src/security`: auth, audit, fairness, compliance evidence, dan integrity checks.
+- `src/frontend`: API client, dashboard, dan admin console.
+- `tests`: unit dan API integration tests.
+
+## Batasan produksi
+
+Sebelum penggunaan multi-instance atau internet-facing, tambahkan external OIDC/JWKS, rate limiter
+terdistribusi, database transaksional/object storage, job queue terpisah, TLS dari reverse proxy,
+centralized observability, backup/restore, serta threat model dan compliance review organisasi.
+
+Detail dependency ada di [tech stack](docs/02_tech_stack.md). Pelaporan kerentanan dijelaskan di
+[SECURITY.md](SECURITY.md). Lisensi proyek: [MIT](LICENSE).

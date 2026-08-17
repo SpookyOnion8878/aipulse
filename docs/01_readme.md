@@ -1,104 +1,35 @@
-# AIPulse Enterprise AI Platform — README
+# Scope dan prinsip AIPulse
 
-> Platform end-to-end untuk mengelola lifecycle AI dari development hingga deployment enterprise-grade.
+Dokumen ini menjelaskan batas produk yang benar-benar diimplementasikan.
 
-## Konsep
+## Tujuan
 
-AIPulse adalah platform komprehensif yang mencakup seluruh workflow AI:
+AIPulse menyediakan alur lokal yang dapat diuji untuk model klasifikasi tabular:
 
-- **Core Skills**: Data Engineering, Model Training & Fine-Tuning, Evaluation, Monitoring
-- **System Design**: Microservices Architecture, API Gateway, Orchestration, Model Registry
-- **Data Engineering**: Feature Store, Data Versioning, Data Pipelines
-- **Security & Ethics**: Bias Detection, Audit Trail, Compliance, Security
-- **Frontend Dashboard**: Monitoring, Admin Panel, Reporting
+1. Membersihkan data tanpa mempelajari transformasi dari keseluruhan dataset.
+2. Memisahkan training/validation secara stratified.
+3. Melatih pipeline preprocessing dan estimator pada training set saja.
+4. Mengukur performa dan menjalankan release gate.
+5. Menyimpan artefak dengan checksum serta metadata registry.
+6. Menyediakan akses registry/training melalui API ber-RBAC.
+7. Menampilkan status aktual melalui UI yang menggunakan API.
 
-## Tech Stack
+## Prinsip implementasi
 
-### Core Skills (Level 1-4)
-- **Python & ML Fundamentals**: NumPy, Pandas, Scikit-learn, SciPy, Matplotlib, Seaborn
-- **Deep Learning & Neural Networks**: PyTorch, TorchVision, TorchAudio, Hugging Face Transformers
-- **Data Management & ETL**: Pandas, PySpark, SQLAlchemy, DVC, Git LFS
-- **Model Training & Fine-Tuning**: PyTorch, Transformers, Weights & Biases, MLflow, Optuna
+- **Evidence over claims.** Fairness dan compliance tidak otomatis dianggap lulus.
+- **Secure failure.** Tanpa JWT secret, health menjadi degraded dan endpoint terlindungi ditolak.
+- **Explicit boundaries.** UI tidak membaca registry atau file model secara langsung.
+- **Reproducible behavior.** Random state, schema validation, dan semantic versioning eksplisit.
+- **Recoverable writes.** Registry, snapshots, feature data, dan artefak memakai atomic replace.
+- **Operational honesty.** File storage dan in-process limits didokumentasikan sebagai batas lokal.
 
-### System Design (Level 5)
-- **API & Microservices**: FastAPI, gRPC, Docker, Kubernetes, Airflow
-- **Model Serving & Deployment**: TensorFlow Serving, NVIDIA Triton, FastAPI
-- **Feature Store & Data Pipelines**: Feast, Kafka, Airflow, dbt
-- **Security & Compliance**: OAuth2, JWT, GDPR, EU AI Act
+## Bukan bagian dari baseline saat ini
 
-### Data Engineering (Level 3)
-- **Feature Store**: Feast (online + offline)
-- **Data Versioning**: DVC + Git LFS
-- **Training Data Pipeline**: Data lake (S3/GCS) → feature store
+- Distributed training atau inference serving.
+- Kubernetes, Airflow, Kafka, Feast, MLflow, DVC CLI, dan object storage cloud.
+- External identity provider, key rotation, atau multi-tenant authorization.
+- Sertifikasi GDPR/EU AI Act atau jaminan immutable/WORM audit storage.
+- Automated deployment ke production.
 
-### Security & Ethics (Level 4)
-- **Bias Detection**: fairness metrics (demographic parity, equalized odds)
-- **Audit Trail**: SHAP explainability, model explainability
-- **Compliance**: GDPR, EU AI Act, data privacy
-- **Security**: input sanitization, model poisoning detection, IAM
-
-### Frontend (Level 5)
-- **Dashboard**: Streamlit for data scientists
-- **Admin Panel**: Role-based access control
-- **Reporting**: Export reports, audit logs
-
-## Struktur Proyek
-
-```
-aipulse/
-├── README.md
-├── requirements.txt
-├── docker-compose.yml
-├── src/
-│   ├── core/
-│   │   ├── data_pipeline.py          # ETL pipeline (Core Skills 1)
-│   │   ├── model_training.py         # Model training & fine-tuning (Core Skills 2)
-│   │   ├── evaluation.py             # Evaluation metrics (Core Skills 3)
-│   │   └── monitoring.py             # Monitoring & drift detection (Core Skills 4)
-│   ├── system/
-│   │   ├── api_gateway.py            # API Gateway & routing (System Design 1)
-│   │   ├── orchestration.py          # Workflow orchestration (System Design 2)
-│   │   └── model_registry.py         # Model registry (System Design 3)
-│   ├── data_engineering/
-│   │   ├── feature_store.py          # Feature store (Data Engineering 1)
-│   │   ├── data_pipeline.py          # Data pipeline (Data Engineering 2)
-│   │   └── dvc_config.py             # DVC configuration (Data Engineering 3)
-│   ├── security/
-│   │   ├── bias_detection.py         # Bias detection (Security & Ethics 1)
-│   │   ├── audit_trail.py            # Audit trail (Security & Ethics 2)
-│   │   └── compliance.py             # Compliance (Security & Ethics 3)
-│   └── frontend/
-│       ├── dashboard.py              # Dashboard (Frontend 1)
-│       └── admin_panel.py            # Admin panel (Frontend 2)
-├── docs/
-│   ├── 01_readme.md                  # This file
-│   ├── 02_tech_stack.md              # Tech Stack Detail
-│   └── 03_architecture_design.md     # Architecture Design
-├── tests/
-└── .gitignore
-```
-
-## Cara Menjalankan
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Build and run Docker compose
-docker-compose up --build
-
-# Atau jalankan langsung
-python -m src.core.data_pipeline
-```
-
-## Dokumentasi
-
-Setiap step proyek ini memiliki dokumentasi terpisah:
-
-- `docs/01_readme.md` — Overview
-- `docs/02_tech_stack.md` — Tech Stack Detail
-- `docs/03_architecture_design.md` — Arsitektur System Design
-
-## License
-
-MIT
+Komponen tersebut dapat ditambahkan ketika ada kebutuhan dan acceptance criteria yang jelas, bukan
+sekadar sebagai dependency deklaratif.

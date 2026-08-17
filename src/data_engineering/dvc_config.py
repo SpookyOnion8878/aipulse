@@ -1,203 +1,131 @@
-"""
-DVC Configuration — Step 3: Data Engineering
+"""Checksummed local dataset snapshots.
 
-AIPulse Enterprise AI Platform — DVC Configuration
-Handles data versioning and storage configuration.
+This is intentionally named a snapshot store rather than pretending to be a
+DVC remote. A real DVC adapter can replace it behind the same boundary later.
 """
 
-import os
-import sys
+from __future__ import annotations
+
+import hashlib
 import json
-import logging
-from datetime import datetime
+import os
+import re
+import shutil
+import tempfile
+import threading
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Any
 
-import yaml
-
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(LOG_DIR, 'dvc.log')),
-    ],
-)
-logger = logging.getLogger("aipulse.dvc")
+VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
-class DVCFilesystemStorage:
-    """Filesystem storage backend for DVC."""
-
-    def __init__(self, storage_path: str = "data/dvc"):
-        self.storage_path = storage_path
-        os.makedirs(storage_path, exist_ok=True)
-
-    def store(self, path: str, local_path: str) -> str:
-        """Store a file with DVC."""
-        # Simulate DVC store operation
-        dest_path = os.path.join(self.storage_path, os.path.basename(path))
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-        # Copy file to DVC store
-        import shutil
-        shutil.copy2(local_path, dest_path)
-
-        logger.info(f"Stored file: {local_path} -> {dest_path}")
-        return dest_path
-
-    def pull(self, path: str) -> str:
-        """Pull a file from DVC store."""
-        dest_path = os.path.join(self.storage_path, os.path.basename(path))
-        if os.path.exists(dest_path):
-            logger.info(f"Pulled file: {path}")
-            return dest_path
-        logger.warning(f"File not found in DVC store: {path}")
-        return None
-
-    def push(self, path: str) -> str:
-        """Push a file to DVC store."""
-        return self.store(path, path)
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-class DVCSnapshot:
-    """Manages DVC snapshots for data versioning."""
+class SnapshotStore:
+    """Create, verify, list, compare, and restore immutable local snapshots."""
 
-    def __init__(self, snapshot_path: str = "data/snapshots"):
-        self.snapshot_path = snapshot_path
-        os.makedirs(snapshot_path, exist_ok=True)
+    def __init__(self, root: str | Path = "data/snapshots") -> None:
+        self.root = Path(root).resolve()
+        self.manifest_path = self.root / "manifest.json"
+        self._lock = threading.RLock()
 
-    def create_snapshot(self, data_path: str, snapshot_name: str) -> str:
-        """Create a DVC snapshot."""
-        snapshot_path = os.path.join(self.snapshot_path, f"{snapshot_name}.parquet")
-        import shutil
-        if os.path.exists(data_path):
-            shutil.copy2(data_path, snapshot_path)
-            logger.info(f"Created snapshot: {snapshot_name}")
-        return snapshot_path
+    def _load_manifest(self) -> dict[str, Any]:
+        if not self.manifest_path.exists():
+            return {"schema_version": 1, "snapshots": {}}
+        try:
+            data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Snapshot manifest is invalid") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("snapshots"), dict):
+            raise ValueError("Snapshot manifest has an invalid schema")
+        return data
 
-    def list_snapshots(self) -> List[str]:
-        """List all snapshots."""
-        return [f for f in os.listdir(self.snapshot_path) if f.endswith('.parquet')]
+    def _save_manifest(self, data: dict[str, Any]) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        descriptor, temp_name = tempfile.mkstemp(prefix=".manifest.", suffix=".json", dir=self.root)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.manifest_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
 
-    def restore_snapshot(self, snapshot_name: str, target_path: str) -> str:
-        """Restore a snapshot to target path."""
-        snapshot_path = os.path.join(self.snapshot_path, f"{snapshot_name}.parquet")
-        if os.path.exists(snapshot_path):
-            import shutil
-            shutil.copy2(snapshot_path, target_path)
-            logger.info(f"Restored snapshot: {snapshot_name}")
+    def create_snapshot(self, source: str | Path, version: str) -> dict[str, str]:
+        if VERSION.fullmatch(version) is None:
+            raise ValueError("Invalid snapshot version")
+        source_path = Path(source).resolve()
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Snapshot source not found: {source_path}")
+        suffix = source_path.suffix.lower() or ".bin"
+        destination = (self.root / f"{version}{suffix}").resolve()
+        if not destination.is_relative_to(self.root):
+            raise ValueError("Snapshot path escapes the store")
+        with self._lock:
+            manifest = self._load_manifest()
+            if version in manifest["snapshots"]:
+                raise ValueError(f"Snapshot already exists: {version}")
+            self.root.mkdir(parents=True, exist_ok=True)
+            descriptor, temp_name = tempfile.mkstemp(
+                prefix=f".{version}.", suffix=suffix, dir=self.root
+            )
+            os.close(descriptor)
+            try:
+                shutil.copy2(source_path, temp_name)
+                os.replace(temp_name, destination)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
+            record = {
+                "version": version,
+                "file": destination.name,
+                "sha256": _sha256(destination),
+                "created_at": datetime.now(UTC).isoformat(),
+                "source_name": source_path.name,
+            }
+            manifest["snapshots"][version] = record
+            self._save_manifest(manifest)
+            return record
+
+    def list_snapshots(self) -> list[dict[str, str]]:
+        manifest = self._load_manifest()
+        return [dict(item) for _, item in sorted(manifest["snapshots"].items())]
+
+    def restore_snapshot(self, version: str, target: str | Path) -> Path:
+        manifest = self._load_manifest()
+        record = manifest["snapshots"].get(version)
+        if not isinstance(record, dict):
+            raise FileNotFoundError(f"Unknown snapshot: {version}")
+        source = (self.root / record["file"]).resolve()
+        if not source.is_relative_to(self.root) or not source.is_file():
+            raise ValueError("Snapshot artifact is missing or unsafe")
+        if _sha256(source) != record["sha256"]:
+            raise ValueError("Snapshot checksum mismatch")
+        target_path = Path(target).resolve()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target_path)
         return target_path
 
-
-class DVCRepository:
-    """DVC repository management."""
-
-    def __init__(self, repo_path: str = "data/dvc"):
-        self.repo_path = repo_path
-
-    def init_repo(self) -> None:
-        """Initialize DVC repository."""
-        os.makedirs(self.repo_path, exist_ok=True)
-        logger.info(f"Initialized DVC repository at {self.repo_path}")
-
-    def add_data(self, data_path: str, cache_path: str) -> str:
-        """Add data to DVC."""
-        # Simulate DVC add command
-        logger.info(f"Adding data to DVC: {data_path}")
-        return cache_path
-
-    def commit(self, message: str = "") -> None:
-        """Commit DVC changes."""
-        logger.info(f"Committed DVC changes: {message}")
-
-    def tag(self, tag: str) -> None:
-        """Tag DVC with a tag."""
-        logger.info(f"Tagged DVC with: {tag}")
-
-
-class DataVersioningConfig:
-    """Configuration for data versioning."""
-
-    def __init__(self, config: Dict = None):
-        self.config = config or {}
-        self.settings = {
-            "version_control": "dvc",
-            "storage": "filesystem",
-            "remote": "s3://aipulse-data",
-            "branch": "main",
-            "auto_push": True,
-            "commit": True,
+    def compare_versions(self, version_a: str, version_b: str) -> dict[str, Any]:
+        manifest = self._load_manifest()["snapshots"]
+        if version_a not in manifest or version_b not in manifest:
+            raise FileNotFoundError("Both snapshot versions must exist")
+        return {
+            "version_a": version_a,
+            "version_b": version_b,
+            "identical": manifest[version_a]["sha256"] == manifest[version_b]["sha256"],
+            "sha256_a": manifest[version_a]["sha256"],
+            "sha256_b": manifest[version_b]["sha256"],
         }
 
-    def get_config(self) -> Dict:
-        """Get full DVC configuration."""
-        return self.settings
 
-    def configure(self, overrides: Dict) -> None:
-        """Configure DVC settings."""
-        self.settings.update(overrides)
-        logger.info(f"DVC configuration updated: {overrides}")
-
-
-class DataVersioningManager:
-    """Manager for data versioning operations."""
-
-    def __init__(self, config: DataVersioningConfig = None):
-        self.config = config or DataVersioningConfig()
-        self.vc = DVCSnapshot()
-        self.storage = DVCFilesystemStorage()
-
-    def init_dvc_repo(self) -> DVCRepository:
-        """Initialize DVC repository."""
-        repo = DVCRepository("data/dvc")
-        repo.init_repo()
-        self.config.configure({"version_control": "dvc", "storage": "filesystem"})
-        return repo
-
-    def create_version(self, source_file: str, version_name: str) -> str:
-        """Create a new data version."""
-        snapshot_path = self.vc.create_snapshot(source_file, version_name)
-        self.config.configure({"storage": "filesystem", "remote": "s3://aipulse-data"})
-        return snapshot_path
-
-    def tag_version(self, version_name: str, tag: str) -> bool:
-        """Tag a version with a git-like tag."""
-        self.vc.create_snapshot(version_name, tag)
-        self.config.configure({"tag": tag})
-        return True
-
-    def compare_versions(self, version_a: str, version_b: str) -> str:
-        """Compare two versions of data."""
-        return f"Comparing versions {version_a} and {version_b}"
-
-
-# Entry point
-def main():
-    """Run DVC configuration."""
-    config = DataVersioningConfig()
-
-    # Initialize DVC
-    manager = DataVersioningManager(config)
-
-    # Initialize DVC repo
-    manager.init_dvc_repo()
-
-    # Create a version
-    version = manager.create_version("data/raw/dataset.csv", "v1.0.0")
-    print(f"Created version: {version}")
-
-    # Tag version
-    manager.tag_version("v1.0.0", "release")
-
-    # List snapshots
-    snapshots = manager.vc.list_snapshots()
-    print(f"Snapshots: {snapshots}")
-
-
-if __name__ == "__main__":
-    main()
+DVCSnapshot = SnapshotStore

@@ -1,67 +1,41 @@
-# Tech Stack Detail
+# Tech stack aktual
 
-## Core Skills (Level 1-4)
+## Runtime
 
-### 1. Python & ML Fundamentals
-- Python 3.11+
-- NumPy, Pandas, SciPy — data manipulation
-- Scikit-learn — classical ML models
-- Matplotlib, Seaborn — visualization
-- Jupyter Notebook — development environment
+- Python 3.11–3.14.
+- FastAPI dan Uvicorn untuk HTTP API.
+- Pydantic untuk validasi request.
+- PyJWT untuk verifikasi JWT HMAC pada baseline lokal.
+- Streamlit untuk operations dashboard dan admin console.
 
-### 2. Deep Learning & Neural Networks
-- **PyTorch** — primary framework for training and inference
-- **TensorFlow** — alternative for production deployment
-- **Hugging Face Transformers** — pre-trained LLMs, NLP models
-- **Keras** — high-level API for model building
-- **TorchVision, TorchAudio** — vision and audio models
+## Data dan machine learning
 
-### 3. Data Management & ETL
-- **Pandas** — tabular data processing
-- **PySpark** — distributed data processing
-- **SQLAlchemy** — ORM and database operations
-- **DVC (Data Version Control)** — versioning datasets
-- **Git LFS** — large file versioning
-- **S3/GCS** — cloud storage integration
+- Pandas dan PyArrow untuk data tabular serta Parquet.
+- NumPy untuk perhitungan numerik.
+- scikit-learn untuk preprocessing, logistic regression, random forest, dan metrik.
+- Joblib untuk serialisasi model pipeline.
 
-### 4. Model Training & Fine-Tuning
-- **Hugging Face** — model fine-tuning and training
-- **Weights & Biases (W&B)** — experiment tracking
-- **MLflow** — model registry and tracking
-- **Optuna** — hyperparameter optimization
-- **Ray** — distributed training
+## Persistence lokal
 
-## System Design (Level 5)
+- File Parquet untuk processed data dan feature store.
+- File Joblib untuk model artifact.
+- Registry JSON dengan lock proses dan atomic replace.
+- JSONL audit trail dengan hash chain; HMAC digunakan saat secret tersedia.
+- Snapshot file dengan manifest checksum sebagai versioning lokal yang jujur.
 
-### 5. API & Microservices
-- **FastAPI** — REST API framework
-- **gRPC** — high-performance RPC
-- **Docker** — containerization
-- **Kubernetes** — orchestration
-- **Airflow** — workflow orchestration
+Persistence ini sesuai untuk satu host/satu writer. Database dan object storage diperlukan untuk
+high availability, multi-instance consistency, access policy terpusat, dan disaster recovery.
 
-### 6. Model Serving & Deployment
-- **TensorFlow Serving** — model deployment
-- **NVIDIA Triton** — inference serving
-- **FastAPI** — API gateway
-- **Hugging Face Diffusers** — generative AI
+## Quality dan delivery
 
-### 7. Feature Store & Data Pipelines
-- **Feast** — feature store
-- **Kafka** — real-time data streaming
-- **Airflow** — scheduled pipeline orchestration
-- **dbt** — data transformation
+- Pytest untuk unit dan API integration tests.
+- Ruff untuk lint dan format check.
+- Mypy strict untuk source project; namespace eksternal tanpa typed marker dikecualikan secara sempit.
+- Docker/Compose dengan non-root user, health checks, localhost port binding, dan resource limits.
+- GitHub Actions menjalankan lint, format check, strict type-check, tests, dan image build.
 
-### 8. Security & Compliance
-- **OAuth2 / OpenID Connect** — authentication
-- **JWT** — token-based auth
-- **SQLAlchemy** — data integrity
-- **GDPR Compliance** — data privacy
-- **EU AI Act** — AI regulation
+## Dependency policy
 
-## Monitoring & Observability
-- **Prometheus** — metrics collection
-- **Grafana** — dashboard visualization
-- **ELK Stack** — logging and searching
-- **Sentry** — error tracking
-- **MLflow** — model monitoring
+Range dependency dibatasi pada major version. NumPy memakai environment marker karena Python 3.14
+memerlukan wheel seri yang lebih baru, sementara target Python 3.11 menggunakan seri kompatibel.
+Update dependency harus melewati seluruh quality gate dan review perubahan transitive dependency.
